@@ -5,3 +5,6 @@ Usage:
 1. make
 2. ./http_server
 3. open your web browser and enter the address: localhost:8888/index.html
+
+
+Reference project:[Tinyhttpd](http://sourceforge.net/projects/tinyhttpd/)
