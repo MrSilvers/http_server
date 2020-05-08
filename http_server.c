@@ -11,36 +11,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "request.h"
-/*
-struct header{
-    char *origin_header;
-    char method[8];
-char *uri;
-};
 
-struct get{
-    char *uri_path;
-    char *uri_query;
-};
-
-struct post{
-    int content_length;
-    char *from_data;
-    char *uri;
-};
-
-struct method{
-    struct get get;
-    struct post post;
-};
-
-struct request{
-    char method[8];
-    struct header header;
-    struct get get;
-    struct post post;
-};
-*/
+#define MAX_RECV_LEN 255
 
 char* req_header_pointer_seq = NULL;
 char* request_handle(int client_sockfd,char *request_str);
@@ -56,14 +28,16 @@ int main(int argc,char const *argv[]){
     struct sockaddr_in client_addr;
     int server_sockfd = -1;
     u_short server_port = 8888;
-    char buffer[4096];
+    char buffer[MAX_RECV_LEN+1];
+    char *request_str = (char *)malloc(MAX_RECV_LEN+1);
+    char *request_str_temp = NULL;
     socklen_t client_addr_len = sizeof(client_addr);
 
     server_sockfd = http_socket(&server_port);
     printf("http server running in port 8888...\n");
     while(1){
-        int numbytes;
-        int i = 0;
+        int numbytes = 0;
+        int recv_times = 1;
         char *msg = NULL;
         memset(&buffer,0,sizeof(buffer));
         int client_sockfd = accept(server_sockfd,(struct sockaddr *)&client_addr,&client_addr_len);
@@ -72,16 +46,34 @@ int main(int argc,char const *argv[]){
             exit(1);
         }
         printf("client connect.\n");
-        //while((numbytes=recv(client_sockfd,buffer,sizeof(buffer),0)>0)){
-        //    i++;
 
-        
-        //}
-        numbytes = recv(client_sockfd,buffer,sizeof(buffer),0);
-        printf("recv times: %d\n",i);
-        msg = request_handle(client_sockfd,buffer);
+        numbytes = recv(client_sockfd,buffer,MAX_RECV_LEN,0);
+        strcpy(request_str,buffer);
+        while(numbytes==MAX_RECV_LEN){
+
+            recv_times++;
+            request_str_temp = (char *)realloc(request_str,(MAX_RECV_LEN+1)*recv_times);
+            if(!request_str_temp){
+                perror("realloc");
+                exit(1);
+            }
+            request_str = request_str_temp;
+            memset(buffer,0,sizeof(buffer));
+            numbytes = recv(client_sockfd,buffer,MAX_RECV_LEN,0);
+            strcat(request_str,buffer);
+
+        };
+        printf("recv times: %d\n",recv_times);
+        *(request_str+(MAX_RECV_LEN)*(recv_times-1)+numbytes) = '\0';
+        printf("request header size: %d\n", (MAX_RECV_LEN)*(recv_times-1)+numbytes);
+        // *(request_str+strlen(request_str)) = '\0';
+        // printf("request header size: %d\n", strlen(request_str)+1);
+        msg = request_handle(client_sockfd,request_str);
         printf("request handle result: %s\n",msg);
+        free(request_str);
+        request_str = NULL;
     }
+    
     return 0;
 }
 
@@ -128,18 +120,30 @@ char* request_handle(int client_sockfd,char *request_str){
     struct header header;
     memset(&request,0,sizeof(request));
     memset(&header,'\0',sizeof(header));
-    char buf[4096];
 
-    //strcpy把src所指向的字符串复制到dest所指向的空间中，遇到'\0'结束（'\0'也会拷贝过去） ,但header_str没有'\0'
+    /*char buf[4096];
+    // strcpy把src所指向的字符串复制到dest所指向的空间中，遇到'\0'结束（'\0'也会拷贝过去） ,但request_str没有'\0'
     strcpy(buf,request_str);
     buf[strlen(request_str)] = '\0';
     //strlen的结果不包含'/0'
     header.origin_header = (char *)malloc(strlen(buf)+1);
     strcpy(header.origin_header,buf);
     header.origin_header[strlen(buf)] = '\0';
+    */
+
+    // 这种方法节省了空间，但多线程下可能会导致request_str数据被篡改，因此适合单线程模式
+    // char *buf = request_str;
+
+    // 这种方法牺牲了空间，但针对buf的修改不会传递到request_str指向的内存（也就是原生的request header），适合多线程模式
+    char *buf = (char *)malloc(strlen(request_str)+1);// strlen的结果不包含'/0'
+    printf("request_handle buf malloc size: %ld\n",strlen(request_str)+1);
+    strcpy(buf,request_str);
+    header.origin_header = (char *)malloc(strlen(buf)+1);
+    // strcpy把src所指向的字符串复制到dest所指向的空间中，遇到'\0'结束（'\0'也会拷贝过去）,改进后request_str有'\0'
+    strcpy(header.origin_header,buf);
+
     char *step = " \r\n";
     char *token;
-
     //get request method
     token = strtok(buf,step);
     strcpy(header.method,token);
@@ -240,7 +244,7 @@ char *get_handle(int client_sockfd,struct request *request){
 
             }else{
                 printf("read html file...\n") ;
-                char buf[1024];
+
                 memset(buf,0,sizeof(buf));
                 response_200ok(client_sockfd,buf);
                 memset(buf,0,sizeof(buf));
@@ -263,7 +267,7 @@ char *get_handle(int client_sockfd,struct request *request){
         }
 		
     }else{
-        int cgi = 1;
+        
         run_cgi(client_sockfd,request);
     }
     close(client_sockfd);
@@ -274,7 +278,7 @@ char *get_handle(int client_sockfd,struct request *request){
 void response(int client_sockfd,char* content){
     printf("send: %s to client.\n",content);
     send(client_sockfd,content,strlen(content),0);
-    //close(client_sockfd);
+
 }
 
 void response_200ok(int client_sockfd,char *buf){
@@ -296,7 +300,7 @@ void response_404not_found(int client_sockfd,char *buf){
 char *post_handle(int client_sockfd,struct request *request){
     struct stat cgi_program;
     char filename[512];
-    char buf[4096];
+    char buf[512];
     sprintf(filename,"./http_server_dir/cgi%s",request->post.uri);
     printf("cgi_program path:%s\n",filename);
     if(stat(filename,&cgi_program)==-1){
