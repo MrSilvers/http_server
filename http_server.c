@@ -8,20 +8,29 @@
 #include<arpa/inet.h>
 #include<unistd.h>
 #include<errno.h>
-#include <sys/types.h>
-#include <sys/stat.h>
+#include<sys/types.h>
+#include<sys/stat.h>
+#include<signal.h>
 #include "request.h"
 
 #define MAX_RECV_LEN 255
+
+#define DEBUG_SWITCH 1
+
+#ifdef DEBUG_SWITCH
+#define DEBUG(fmt,args...) printf("%s(%d)-%s -> " #fmt "\n", __FILE__, __LINE__, __FUNCTION__, ##args)
+#else 
+#define DEBUG(fmt,args...) /* do nothing */
+#endif
 
 char* req_header_pointer_seq = NULL;
 char* request_handle(int client_sockfd,char *request_str);
 char* post_handle(int client_sockfd,struct request *request);
 char* get_handle(int client_sockfd,struct request *request);
 void run_cgi(int client_sockfd,struct request *request);
-void response(int client_sockfd,char* content);
-void response_200ok(int client_sockfd,char *buf);
-void response_404not_found(int client_sockfd,char *buf);
+int response(int client_sockfd,char* content);
+int response_200ok(int client_sockfd,char *buf);
+int response_404not_found(int client_sockfd,char *buf);
 int http_socket(u_short *port);
 
 int main(int argc,char const *argv[]){
@@ -29,9 +38,18 @@ int main(int argc,char const *argv[]){
     int server_sockfd = -1;
     u_short server_port = 8888;
     char buffer[MAX_RECV_LEN+1];
-    char *request_str = (char *)malloc(MAX_RECV_LEN+1);
+    char *request_str = NULL;
     char *request_str_temp = NULL;
+    int request_size = 0;
     socklen_t client_addr_len = sizeof(client_addr);
+    // struct sigaction sa;
+    // sa.sa_handler = SIG_IGN;
+    // sa.sa_flags = 0;
+    // if(sigemptyset(&sa.sa_mask)==-1 || sigaction(SIGPIPE, &sa, 0)==-1){
+    //     perror("set sigaction");
+    //     exit(1);
+    // }
+    signal(SIGPIPE, SIG_IGN);
 
     server_sockfd = http_socket(&server_port);
     printf("http server running in port 8888...\n");
@@ -39,8 +57,14 @@ int main(int argc,char const *argv[]){
         int numbytes = 0;
         int recv_times = 1;
         char *msg = NULL;
+        int client_sockfd;
+
+        if((request_str = (char *)malloc(MAX_RECV_LEN+1)) == NULL){
+            perror("request_str malloc");
+            exit(1);
+        }
         memset(&buffer,0,sizeof(buffer));
-        int client_sockfd = accept(server_sockfd,(struct sockaddr *)&client_addr,&client_addr_len);
+        client_sockfd = accept(server_sockfd,(struct sockaddr *)&client_addr,&client_addr_len);
         if(client_sockfd == -1){
             perror("accept");
             exit(1);
@@ -63,13 +87,19 @@ int main(int argc,char const *argv[]){
             strcat(request_str,buffer);
 
         };
-        printf("recv times: %d\n",recv_times);
-        *(request_str+(MAX_RECV_LEN)*(recv_times-1)+numbytes) = '\0';
-        printf("request header size: %d\n", (MAX_RECV_LEN)*(recv_times-1)+numbytes);
+        DEBUG("recv times: %d",recv_times);
+        request_size = MAX_RECV_LEN * (recv_times - 1) + numbytes; 
+        DEBUG("request header size: %d", request_size);
+        // 判断是否符合最小http请求大小"GET / HTTP/1.0\r\n\r\n\r\n"
+        if(request_size >= 3+1+1+1+8+2+4){
+            *(request_str+request_size) = '\0';
+            msg = request_handle(client_sockfd,request_str);
+            printf("request handle result: %s\n",msg);
+        }else {
+            printf("Invalid request.\n");
+        }
         // *(request_str+strlen(request_str)) = '\0';
-        // printf("request header size: %d\n", strlen(request_str)+1);
-        msg = request_handle(client_sockfd,request_str);
-        printf("request handle result: %s\n",msg);
+        DEBUG("request: %s", request_str);
         free(request_str);
         request_str = NULL;
     }
@@ -136,7 +166,7 @@ char* request_handle(int client_sockfd,char *request_str){
 
     // 这种方法牺牲了空间，但针对buf的修改不会传递到request_str指向的内存（也就是原生的request header），适合多线程模式
     char *buf = (char *)malloc(strlen(request_str)+1);// strlen的结果不包含'/0'
-    printf("request_handle buf malloc size: %ld\n",strlen(request_str)+1);
+    DEBUG("request_handle buf malloc size: %ld",strlen(request_str)+1);
     strcpy(buf,request_str);
     header.origin_header = (char *)malloc(strlen(buf)+1);
     // strcpy把src所指向的字符串复制到dest所指向的空间中，遇到'\0'结束（'\0'也会拷贝过去）,改进后request_str有'\0'
@@ -153,9 +183,9 @@ char* request_handle(int client_sockfd,char *request_str){
     header.uri = (char *)malloc(strlen(token)+1);
     strcpy(header.uri,token);
 
-    printf("The HTTP Header: %s\n",header.origin_header);
-    printf("The Request Method: %s\n",header.method);
-    printf("The Request URI: %s\n",header.uri);
+    DEBUG("The HTTP Header: %s",header.origin_header);
+    DEBUG("The Request Method: %s",header.method);
+    DEBUG("The Request URI: %s",header.uri);
 
     // pack data
     request.header = header;
@@ -175,16 +205,16 @@ char* request_handle(int client_sockfd,char *request_str){
 
             }else{
                 //pass
-                printf("in 2...\n");
+                DEBUG("in 2...");
             }
 
         }else{
             //pass
-            printf("in 1...\n");
+            DEBUG("in 1...");
         }
-        printf("GET URI PATH: %s\n",r_get.uri_path);
-        printf("GET URI Query: %s\n",r_get.uri_query);
-        printf("enter get_handle func...\n");
+        DEBUG("GET URI PATH: %s",r_get.uri_path);
+        DEBUG("GET URI Query: %s",r_get.uri_query);
+        DEBUG("enter get_handle func...");
         //pack data
         request.get = r_get;
 
@@ -209,7 +239,7 @@ char* request_handle(int client_sockfd,char *request_str){
         }
         r_post.from_data -= i;
         request.post = r_post;
-        printf("from_data: %s\n",r_post.from_data);
+        DEBUG("from_data: %s",r_post.from_data);
         return post_handle(client_sockfd,&request);
 
     }else{// For Bad Request Method
@@ -237,13 +267,13 @@ char *get_handle(int client_sockfd,struct request *request){
             perror("get file stat");
 
         }else{
-            printf("file mode: %d\n",file_st.st_mode);
+            DEBUG("file mode: %d",file_st.st_mode);
             if(file_st.st_mode & S_IFDIR){
 
                 response_404not_found(client_sockfd,buf);
 
             }else{
-                printf("read html file...\n") ;
+                DEBUG("read html file...") ;
 
                 memset(buf,0,sizeof(buf));
                 response_200ok(client_sockfd,buf);
@@ -259,7 +289,10 @@ char *get_handle(int client_sockfd,struct request *request){
                 while (!feof(resource)){
                     //printf("send: %s\n",buf);
                     //send(client_sockfd, buf, strlen(buf), 0);
-                    response(client_sockfd,buf);
+                    if(-1==response(client_sockfd,buf)){
+                        fprintf(stderr, "client connect close.\n");
+                        break;
+                    };
                     fgets(buf, sizeof(buf), resource);
                 }
                 fclose(resource);
@@ -271,29 +304,44 @@ char *get_handle(int client_sockfd,struct request *request){
         run_cgi(client_sockfd,request);
     }
     close(client_sockfd);
-    printf("client connect close.\n");
+    DEBUG("client connect close.");
     return "return get response!\n";
 }
 
-void response(int client_sockfd,char* content){
-    printf("send: %s to client.\n",content);
-    send(client_sockfd,content,strlen(content),0);
+int response(int client_sockfd,char* content){
+    DEBUG("send: %s to client.",content);
+    if(-1==send(client_sockfd,content,strlen(content),0)){
+        close(client_sockfd);
+        perror("response:send");
+        return -1;
+    }
+    return 0;
 
 }
 
-void response_200ok(int client_sockfd,char *buf){
+int response_200ok(int client_sockfd,char *buf){
     memset(buf,0,sizeof(buf));
     strcpy(buf,"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
-    printf("send: %s\n",buf);
-    send(client_sockfd,buf,strlen(buf),0);
+    DEBUG("send: %s",buf);
+    if(-1==send(client_sockfd,buf,strlen(buf),0)){
+        close(client_sockfd);
+        perror("response_200ok:send");
+        return -1;
+    }
+    return 0;
 }
 
 
-void response_404not_found(int client_sockfd,char *buf){
+int response_404not_found(int client_sockfd,char *buf){
     memset(buf,0,sizeof(buf));
     strcpy(buf,"HTTP/1.0 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n");
     strcat(buf,"<HTML><TITLE>Not Found</TITLE>\r\n<BODY><P>The server could not fulfill\r\nyour request because the resource specified\r\nis unavailable or nonexistent.\r\n</BODY></HTML>\r\n");
-    send(client_sockfd,buf,strlen(buf),0);
+    if(-1==send(client_sockfd,buf,strlen(buf),0)){
+         close(client_sockfd);
+         perror("response_404not_found:send");
+         return -1;
+    }
+    return 0;
 }
 
 
